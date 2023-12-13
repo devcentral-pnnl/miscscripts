@@ -1,0 +1,9 @@
+pixiecore:
+  imagePullPolicy: IfNotPresent
+upstreamURL: http://pixiecore
+port: 9200
+nodeSelector: {}
+listen:
+  interface: ""
+  ip: ""
+extraArgs: []

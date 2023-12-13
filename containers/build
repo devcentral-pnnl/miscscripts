@@ -1,3 +1,67 @@
 #!/bin/bash
 CONTAINER="$1"
-docker build -t pnnl-miscscripts/$CONTAINER:latest $CONTAINER
+[ "x$2" != "x" ] && export SUBBUILD="$2"
+pushd $(dirname "$0")/"$CONTAINER"
+
+[ ! -d hubbuildtools ] && git clone https://github.com/kfox1111/hubbuildtools
+
+export DOCKER_REPO=pnnlmiscscripts/"$CONTAINER"
+export DOCKER_TAG=latest
+
+[ -f buildenv ] && . buildenv
+
+function cleanup () {
+	if [ "x$CI" != "x" ]; then
+		docker rmi "$DOCKER_REPO:$REVISION"
+		docker rmi "$IMAGE_NAME"
+		docker image prune -f
+	fi
+}
+
+if [ "x$IMAGE_NAME" == "x" ]; then
+	export IMAGE_NAME="${DOCKER_REPO}:${DOCKER_TAG}"
+fi
+
+if [ "x$GPGSIGN" != "x" ]; then
+	[ ! -f rpm.pub ] && cp -a ../../rpm.pub .
+	[ ! -f rpmmacros ] && cp -a ../rpmmacros .
+	export GPGKEY=$(pwd)/../../rpm.priv
+fi
+
+#Workaround https://github.com/moby/moby/issues/39120
+if [ "x$DOCKER_BUILDKIT" != "x" ]; then
+	sudo cat /etc/docker/daemon.json
+	echo '{"mtu": 1460}' | sudo dd of=/etc/docker/daemon.json
+	sudo systemctl restart docker
+	docker ps -a
+fi
+
+hubbuildtools/hubhookhelpers/build
+RES=$?
+
+if [ "x$GPGSIGN" != "x" ]; then
+rm -f "$GPGKEY" || true
+fi
+
+if [ $RES -eq 42 ]; then
+	echo Nothing changed. Skipping.
+	cleanup
+	exit 0
+fi
+if [ $RES != 0 ]; then
+	echo Something went wrong. Failing.
+	exit $RES
+fi
+
+REVISION=$(hubbuildtools/fetchlocalrevision.sh "$IMAGE_NAME")
+
+docker tag "$IMAGE_NAME" "$DOCKER_REPO:$REVISION"
+
+echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+docker push "$DOCKER_REPO:$REVISION"
+docker push "$IMAGE_NAME"
+
+cleanup
+
+popd

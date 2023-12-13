@@ -1,0 +1,19 @@
+{{- if .Values.letsencrypt.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt-production
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "namespace.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ .Values.contact }}
+
+    privateKeySecretRef:
+      name: letsencrypt-production
+
+    solvers:
+{{ toYaml .Values.letsencrypt.solvers | indent 6 }}
+{{- end }}

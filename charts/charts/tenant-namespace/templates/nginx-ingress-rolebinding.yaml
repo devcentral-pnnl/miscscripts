@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ template "namespace.fullname" . }}
+  namespace: {{ .Values.magicnamespace.namespace }}
+  labels:
+    {{- include "namespace.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ template "namespace.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ .Release.Name }}-ingress
+  namespace: {{ .Release.Namespace | quote }}

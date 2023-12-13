@@ -1,0 +1,12 @@
+---
+# Use the 'create api' subcommand to add watches to this file.
+- version: v1beta1
+  group: miscscripts.pnnl.gov
+  kind: TenantNamespace
+  role: tenantnamespace
+  reconcilePeriod: "60s"
+  markUnsafe: true
+  finalizer:
+    name: finalizer.tenantnamespace.miscscripts.pnnl.gov
+    role: tenantnamespacefin
+#+kubebuilder:scaffold:watch

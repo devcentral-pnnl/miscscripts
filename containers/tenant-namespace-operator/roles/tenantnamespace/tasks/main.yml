@@ -1,0 +1,210 @@
+---
+# tasks file for TenantNamespace
+
+- name: Set dryrun value
+  ansible.builtin.set_fact:
+    _dryrun: "{{ lookup('env', 'DRYRUN') | default('False') | bool }}"
+
+# required until markUnsafe applies to the full fact from the sdk
+- name: Fetch cr content safely
+  kubernetes.core.k8s_info:
+    api_version: miscscripts.pnnl.gov/v1beta1
+    kind: TenantNamespace
+    name: "{{ ansible_operator_meta.name }}"
+  register: _cr_response
+  failed_when:
+    - _cr_response.resources | length == 0
+
+- name: Set cr var
+  ansible.builtin.set_fact:
+    _safe_cr: "{{ _cr_response.resources[0] }}"
+
+- name: Set admin labels
+  ansible.builtin.set_fact:
+    _adminlabels: "{{ _safe_cr.spec.extraNamespaceLabels | default({}) | combine({'name': ansible_operator_meta.name + '-admin', 'miscscripts.pnnl.gov/namespace-type': 'admin'}, recursive=True) }}"
+
+- name: Create the k8s admin namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ansible_operator_meta.name }}-admin"
+        labels: "{{ _adminlabels }}"
+        annotations: "{{ _safe_cr.spec.extraNamespaceAnnotations | default({}) }}"
+  check_mode: "{{ _dryrun }}"
+
+- name: Set initial defaults. They be overridden.
+  ansible.builtin.set_fact:
+    _merged_values:
+      magicnamespace:
+        tiller:
+          enabled: false
+      gitlabRunner:
+        autoSetNamespaceAndTags: true
+        spec:
+          runners: {}
+      ingress:
+        nginx:
+          enabled: true
+
+- name: Load in Flavor values if referenced
+  when:
+    - _safe_cr.spec.flavorRef is defined
+    - _safe_cr.spec.flavorRef.kind == "TenantNamespaceFlavor"
+    - _safe_cr.spec.flavorRef.group == "miscscripts.pnnl.gov"
+  block:
+    - name: Fetch referenced flavor
+      kubernetes.core.k8s_info:
+        api_version: miscscripts.pnnl.gov/v1beta1
+        kind: TenantNamespaceFlavor
+        name: "{{ _safe_cr.spec.flavorRef.name }}"
+      register: _flavor
+      # Failures immediately trigger another reconciliation
+      failed_when:
+        - _flavor.resources | length == 0
+    - name: Merge in flavor values
+      ansible.builtin.set_fact:
+        _merged_values: "{{ _merged_values | combine(_flavor.resources[0].spec, recursive=True) }}"
+
+- name: Set values from CR
+  ansible.builtin.set_fact:
+    _merged_values: "{{ _merged_values | combine(_safe_cr.spec, recursive=True) }}"
+
+- name: Setup gitlabRunner if needed
+  ansible.builtin.set_fact:
+    _gitlabrunnerconfig:
+      gitlabRunner:
+        spec:
+          runners:
+            namespace: "{{ ansible_operator_meta.name }}"
+            tags: "{{ (_merged_values.gitlabRunner.spec.runners.tags.split(',') + [ansible_operator_meta.name]) | unique | list | join(',') }}"
+  when:
+    - _merged_values.gitlabRunner.spec.runners.tags is defined
+- name: Setup gitlabRunner if needed
+  ansible.builtin.set_fact:
+    _gitlabrunnerconfig:
+      gitlabRunner:
+        spec:
+          runners:
+            namespace: "{{ ansible_operator_meta.name }}"
+            tags: "{{ ansible_operator_meta.name }}"
+  when:
+    - _merged_values.gitlabRunner.spec.runners.tags is not defined
+
+- name: Merge gitlabRunner values
+  ansible.builtin.set_fact:
+    _merged_values: "{{ _merged_values | combine(_gitlabrunnerconfig, recursive=True) }}"
+  when:
+    - _merged_values.gitlabRunner.autoSetNamespaceAndTags
+
+- name: Set value for forced settings
+  ansible.builtin.set_fact:
+    _overrides:
+      namespace: "{{ ansible_operator_meta.name }}"
+      magicnamespace:
+        namespace: "{{ ansible_operator_meta.name }}"
+      ingress:
+        nginx:
+          clusterRole: "{{ lookup('env', 'INGRESS_CLUSTERROLE') | default('tenant-namespace-operator-ingress-controller') }}"
+        controller:
+          scope:
+            namespace: "{{ ansible_operator_meta.name }}"
+
+- name: Force namespace settings. Can not be overridden.
+  ansible.builtin.set_fact:
+    _merged_values: "{{ _merged_values | combine(_overrides, recursive=True) }}"
+
+- name: Set ingress ip if known
+  ansible.builtin.set_fact:
+    _load_balancer_ip: "{{ _safe_cr.status.loadBalancerIP }}"
+  when:
+    - _safe_cr.status.loadBalancerIP is defined
+
+- name: Fetch ingress service
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    name: "{{ ansible_operator_meta.name }}-ingress-controller"
+    namespace: "{{ ansible_operator_meta.name }}-admin"
+  register: _ingress_service
+  when: >
+        _merged_values.ingress.nginx.enabled and
+        _load_balancer_ip is not defined
+
+# each task inherits the when conditions, rely on not fetching ingress when it is set in status
+- name: Merge in existing ingress ip if exists
+  when:
+    - _merged_values.ingress.controller.service.loadBalancerIP is not defined
+    - _ingress_service.resources[0].status.loadBalancer.ingress[0].ip is defined
+  block:
+    - name: Set ingress ip.
+      ansible.builtin.set_fact:
+        _load_balancer_ip: "{{ _ingress_service.resources[0].status.loadBalancer.ingress[0].ip }}"
+    - name: Set ingress ip in CR status
+      operator_sdk.util.k8s_status:
+        api_version: miscscripts.pnnl.gov/v1beta1
+        kind: TenantNamespace
+        name: "{{ ansible_operator_meta.name }}"
+        namespace: "{{ ansible_operator_meta.namespace }}"
+        status:
+          loadBalancerIP: "{{ _load_balancer_ip }}"
+
+- name: Set ingress ip if specified
+  ansible.builtin.set_fact:
+    _load_balancer_ip: "{{ _merged_values.ingress.controller.service.loadBalancerIP }}"
+  when:
+    - _load_balancer_ip is not defined
+    - _merged_values.ingress.controller.service.loadBalancerIP is defined
+
+- name: Force loadBalancerIP address setting
+  ansible.builtin.set_fact:
+    _load_balancer_ip_overrides:
+      ingress:
+        controller:
+          service:
+            loadBalancerIP: "{{ _load_balancer_ip }}"
+  when:
+    - _load_balancer_ip is defined
+- name: Force loadBalancerIP. Can not be overridden.
+  ansible.builtin.set_fact:
+    _merged_values: "{{ _merged_values | combine(_load_balancer_ip_overrides, recursive=True) }}"
+  when:
+    - _load_balancer_ip is defined
+
+# FIXME Consider making a service account specifically for this so it can't cross namespaces as far as it can today
+- name: Run Helm
+  kubernetes.core.helm:
+    name: "{{ ansible_operator_meta.name }}"
+    namespace: "{{ ansible_operator_meta.name }}-admin"
+    chart_ref: ${HOME}/tenant-namespace
+    values: "{{ _merged_values }}"
+  register: _objs
+  check_mode: "{{ _dryrun }}"
+  diff: "{{ _dryrun }}"
+
+- name: Set diff output on status
+  operator_sdk.util.k8s_status:
+    api_version: miscscripts.pnnl.gov/v1beta1
+    kind: TenantNamespace
+    name: "{{ ansible_operator_meta.name }}"
+    namespace: "{{ ansible_operator_meta.namespace }}"
+    status:
+      diff: "{{ ((_objs.diff.prepared | default('')) + '\n') | b64encode }}"
+
+- name: Set user labels
+  ansible.builtin.set_fact:
+    _userlabels: "{{ _safe_cr.spec.extraNamespaceLabels | default({}) | combine({'name': ansible_operator_meta.name, 'miscscripts.pnnl.gov/namespace-type': 'user'}, recursive=True) }}"
+
+- name: Create the k8s user namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ansible_operator_meta.name }}"
+        labels: "{{ _userlabels }}"
+        annotations: "{{ _safe_cr.spec.extraNamespaceAnnotations | default({}) }}"
+  check_mode: "{{ _dryrun }}"

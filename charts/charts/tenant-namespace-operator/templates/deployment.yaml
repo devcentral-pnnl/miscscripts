@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tenant-namespace-operator.fullname" . }}
+  labels:
+    {{- include "tenant-namespace-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tenant-namespace-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tenant-namespace-operator.selectorLabels" . | nindent 8 }}
+    spec:
+    {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      serviceAccountName: {{ include "tenant-namespace-operator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ include "tenant-namespace-operator.fullname" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          volumeMounts:
+          - mountPath: /tmp/ansible-operator/runner
+            name: runner
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 6789
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 6789
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          args:
+            - "--leader-elect"
+            - "--leader-election-id=tenant-namespace-operator"
+          env:
+            - name: ANSIBLE_GATHERING
+              value: explicit
+            - name: WATCH_NAMESPACE
+{{- if eq .Values.mode "cluster" }}
+              value: ""
+{{- else if ne .Values.mode "cluster" }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+{{- end }}
+            - name: SERVICE_ACCOUNT_NAME
+              value: {{ include "tenant-namespace-operator.serviceAccountName" . }}
+            - name: NAMESPACE
+              value: {{ .Release.Namespace }}
+{{- if .Values.dryrun }}
+            - name: DRYRUN
+              value: "yes"
+{{- end }}
+            - name: INGRESS_CLUSTERROLE
+              value: {{ include "tenant-namespace-operator.fullname" . }}-ic
+      volumes:
+        - name: runner
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}

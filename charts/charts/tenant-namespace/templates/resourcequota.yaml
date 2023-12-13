@@ -1,0 +1,19 @@
+{{- if .Values.quota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Values.magicnamespace.namespace }}
+  labels:
+    {{- include "namespace.labels" . | nindent 4 }}
+spec:
+  hard:
+    pods: {{ .Values.quota.pods }}
+    requests.cpu: {{ .Values.quota.requests.cpu }}
+    requests.memory: {{ .Values.quota.requests.memory }}
+    limits.cpu: {{ .Values.quota.limits.cpu }}
+    limits.memory: {{ .Values.quota.limits.memory }}
+    {{- range $key, $val := .Values.quota.extraQuota }}
+    {{ $key }}: {{ $val | quote }}
+    {{- end }}
+{{- end }}

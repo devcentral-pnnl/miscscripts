@@ -1,0 +1,15 @@
+
+The namespace "{{ .Release.Namespace }}" has been created if it didn't already exist.
+
+{{ if .Values.serviceAccounts -}}
+The following service accounts have been created in the namespace:
+{{- range .Values.serviceAccounts }}
+  - {{ . }}
+{{- end }}
+{{ end }}
+{{ if .Values.roleBindings -}}
+The following role bindings have been created in the namespace:
+{{- range .Values.roleBindings }}
+  - {{ .subject.kind }}[{{ .subject.name }}] --> {{ .role.kind }}[{{ .role.name }}]
+{{- end }}
+{{ end }}
